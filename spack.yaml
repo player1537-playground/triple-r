@@ -1,3 +1,4 @@
 spack:
   specs:
   - python@3.8.7
+  - mpich@3.3.2
