@@ -7,6 +7,7 @@ build=${root:?}/build
 venv=${root:?}/venv
 spack=${root:?}/spack
 data=${root:?}/data
+checkpoint=${root:?}/checkpoint
 basetag=horovod/horovod:0.20.0-tf2.3.0-torch1.6.0-mxnet1.5.0-py3.7-cpu
 tag=horovod_$USER
 registry=accona.eecs.utk.edu:5000
@@ -78,6 +79,35 @@ go-clean() {
     done
 }
 
+go-redirect() (
+    local opt OPTIND OPTARG opt_stdout opt_stderr opt_stdin
+    opt_stdout=
+    opt_stderr=
+    opt_stdin=
+    while getopts "o:e:i:" opt; do
+        case "$opt" in
+        (o) opt_stdout=$OPTARG;;
+        (e) opt_stderr=$OPTARG;;
+        (i) opt_stdin=$OPTARG;;
+        esac
+    done
+    shift $((OPTIND-1))
+
+    if [ -n "$opt_stdout" ]; then
+        exec 1>"$opt_stdout"
+    fi
+
+    if [ -n "$opt_stderr" ]; then
+        exec 2>"$opt_stderr"
+    fi
+
+    if [ -n "$opt_stdin" ]; then
+        exec 0<"$opt_stdin"
+    fi
+
+    exec "$@"
+)
+
 go-trial() {
     : ${SPACK_ENV:?I need to be run in a Spack environment}
     ! [ "${python#${SPACK_ENV:?}}" = "${python:?}" ] || die "Expected ${python} to start with ${SPACK_ENV}"
@@ -98,16 +128,63 @@ go-trial() {
     printf $' %q' "$@" >&2
     printf $'\n' >&2
     printf $'====\n' >&2
+
+    columns=( dataset div num_conv_layers nepochs1 nworkers1 nepochs2 nworkers2 mode )
+    printf $'%s,' "${columns[@]}"
+    printf $'real,user,sys\n'
+
+    for dataset in emnist; do
+    for div in 100; do
+    for num_conv_layers in {2..5}; do
+    for nepochs1 in {10..40..10}; do
+    for nworkers1 in {4..1..-1}; do
+    for nepochs2 in $((50-nepochs1)); do
+    for nworkers2 in $((5-nworkers1)); do
+    for events in "${nepochs1}e/nworkers=${nworkers1} ${nepochs2}e/nworkers=${nworkers2}"; do
+
+    case "$nepochs1:$nworkers1:$nepochs2:$nworkers" in
+    (10:4:40:1) continue;;
+    (10:3:40:2) continue;;
+    esac
+
+    for mode in test; do
+
+    for c in "${columns[@]}"; do
+        printf $'%s,' "${!c}" | tee /dev/stderr
+    done
+
+    rm -f ${checkpoint:?}/*.hdf5
     
-    /usr/bin/time --format='%e,%U,%S' \
-        $(which mpirun) \
-        -np 2 \
-        -hostfile ${root:?}/hostlist.txt \
-        -iface eno1 \
-                ${venv:?}/bin/python triple-r.py horovod \
-                --data-dir ${data:?} \
-                "$@" \
-    2>&1 | tee /dev/stderr
+    /usr/bin/time \
+    --format='%e,%U,%S' \
+        ${root:?}/go.sh redirect \
+        -e /dev/stdout \
+            $(which mpirun) \
+            -np 5 \
+            -hostfile ${root:?}/hostlist.txt \
+            -iface eno1 \
+                    ${venv:?}/bin/python \
+                    -u \
+                        triple-r.py \
+                        --data-dir ${data:?} \
+                        --checkpoint-dir ${checkpoint:?} \
+                        --default-verbosity 2 \
+                        --num-conv-layers ${num_conv_layers} \
+                        --dataset ${dataset} \
+                        --div ${div} \
+                        ${events} \
+    3>&1 4>&2 2>&3- 1>&4- | tee /dev/stderr
+
+    done
+
+    done
+    done
+    done
+    done
+    done
+    done
+    done
+    done
 }
 
 go-docker() {
@@ -120,6 +197,51 @@ go-docker() {
         args+=( "$arg" )
     done
     exec docker "${args[@]}"
+}
+
+go-process-log() {
+    _extract_from_end() {
+        local index_from_end
+        index_from_end=${1:?}
+        awk -v x=${index_from_end} '
+            /^==== Date: / { ++n }
+            { L[n, ++M[n]] = $0 }
+            END {
+                for(i=1; i<=M[n-x]; ++i)
+                    print L[n-x, i]
+            }
+        '
+    }
+
+    _extract_csv() {
+        awk '
+            BEGIN {
+                FS=OFS=",";
+                n = 0;
+            }
+            /^emnist,/ {
+                split($0, ary, FS);
+                H[n++] = ary[1] OFS ary[2] OFS ary[3] OFS ary[4] OFS ary[5];
+                M[n] = 0;
+            }
+            match($0, /^Epoch ([0-9]+)\/([0-9]+)/, ary) {
+                E[n, M[n]] = ary[1];
+            }
+            match($0, /^stats = loss=([0-9.]+) accuracy=([0-9.]+)/, ary) {
+                L[n, M[n]] = ary[1];
+                A[n, M[n]] = ary[2];
+                M[n]++;
+            }
+            END {
+                print "dataset", "num_conv_layers", "nepochs1", "nworkers1", "mode", "epoch", "loss", "accuracy";
+                for (i=0; i<n; ++i)
+                    for (j=0; j<M[i]; ++j)
+                        print H[i], E[i, j], L[i, j], A[i, j];
+            }
+        '
+    }
+
+    _extract_from_end ${1:?need index from end} | _extract_csv
 }
 
 go-"$@"

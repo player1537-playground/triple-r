@@ -1,0 +1,5 @@
+/env.sh
+/.spack-env
+/stderr.txt
+/stdout.txt
+/spack.lock
