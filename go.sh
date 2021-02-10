@@ -129,23 +129,18 @@ go-trial() {
     printf $'\n' >&2
     printf $'====\n' >&2
 
-    columns=( dataset div num_conv_layers nepochs1 nworkers1 nepochs2 nworkers2 mode )
+    columns=( dataset div num_conv_layers nepochs1 nworkers1 mode )
     printf $'%s,' "${columns[@]}"
     printf $'real,user,sys\n'
 
     for dataset in emnist; do
     for div in 100; do
-    for num_conv_layers in {2..5}; do
-    for nepochs1 in {10..40..10}; do
-    for nworkers1 in {4..1..-1}; do
-    for nepochs2 in $((50-nepochs1)); do
-    for nworkers2 in $((5-nworkers1)); do
-    for events in "${nepochs1}e/nworkers=${nworkers1} ${nepochs2}e/nworkers=${nworkers2}"; do
-
-    case "$nepochs1:$nworkers1:$nepochs2:$nworkers" in
-    (10:4:40:1) continue;;
-    (10:3:40:2) continue;;
-    esac
+    for num_conv_layers in 2; do
+    for nepochs1 in 10; do
+    for nworkers1 in 5; do
+    for nepochs2 in ${nepochs1}; do
+    for nworkers2 in ${nworkers1}; do
+    for events in "${nepochs1}e/nworkers=${nworkers1} ${nepochs2}e/nworkers=${nworkers2},reload=True"; do
 
     for mode in test; do
 
@@ -153,7 +148,8 @@ go-trial() {
         printf $'%s,' "${!c}" | tee /dev/stderr
     done
 
-    rm -f ${checkpoint:?}/*.hdf5
+    rm -rf "${checkpoint:?}"
+    mkdir "${checkpoint:?}"
     
     /usr/bin/time \
     --format='%e,%U,%S' \
