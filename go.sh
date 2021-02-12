@@ -8,9 +8,12 @@ venv=${root:?}/venv
 spack=${root:?}/spack
 data=${root:?}/data
 checkpoint=${root:?}/checkpoint
+horovod=${root:?}/horovod
 basetag=horovod/horovod:0.20.0-tf2.3.0-torch1.6.0-mxnet1.5.0-py3.7-cpu
 tag=horovod_$USER
 registry=accona.eecs.utk.edu:5000
+whatreallyhappened=${root:?}/_whatreallyhappened
+host=
 python=$(which python3.8)
 
 [ -f ${root:?}/env.sh ] && . ${root:?}/env.sh
@@ -21,6 +24,30 @@ go-spack() {
     fi
 
     exec ${spack:?}/bin/spack "$@"
+}
+
+go-horovod() {
+    : ${SPACK_ENV:?I need to be run in a Spack environment}
+    : ${VIRTUAL_ENV:?need to be run inside a virtual env}
+    if ! [ -f ${horovod:?}/setup.py ]; then
+        git clone --recursive https://github.com/horovod/horovod.git ${horovod:?}
+    fi
+
+    if [ $# -gt 0 ]; then
+        (cd ${horovod:?} && "$@")
+    fi
+}
+
+go-whatreallyhappened() {
+    : ${SPACK_ENV:?I need to be run in a Spack environment}
+    : ${VIRTUAL_ENV:?need to be run inside a virtual env}
+    if ! [ -f ${whatreallyhappened:?}/go.sh ]; then
+        git clone https://github.com/player1537-playground/whatreallyhappened.git ${whatreallyhappened:?}
+    fi
+
+    if [ $# -gt 0 ]; then
+        (cd ${whatreallyhappened:?} && ./go.sh "$@")
+    fi
 }
 
 go-venv() {
@@ -111,6 +138,9 @@ go-redirect() (
 go-trial() {
     : ${SPACK_ENV:?I need to be run in a Spack environment}
     ! [ "${python#${SPACK_ENV:?}}" = "${python:?}" ] || die "Expected ${python} to start with ${SPACK_ENV}"
+    source whatreallyhappened.bash || die "Could not load whatreallyhappened.bash"
+
+    wrh_open logs/main.log a
 
     exec > >(tee -a stdout.txt)
     exec 2> >(tee -a stderr.txt >/dev/stderr)
@@ -148,8 +178,15 @@ go-trial() {
         printf $'%s,' "${!c}" | tee /dev/stderr
     done
 
+    wrh_push 'trial'
+    for c in "${columns[@]}"; do
+        wrh_log "$c" "${!c}"
+    done
+
     rm -rf "${checkpoint:?}"
     mkdir "${checkpoint:?}"
+
+    wrh_save -n info
     
     /usr/bin/time \
     --format='%e,%U,%S' \
@@ -157,7 +194,7 @@ go-trial() {
         -e /dev/stdout \
             $(which mpirun) \
             -np 5 \
-            -hostfile ${root:?}/hostlist.txt \
+            -host ${host:?} \
             -iface eno1 \
                     ${venv:?}/bin/python \
                     -u \
@@ -168,9 +205,13 @@ go-trial() {
                         --num-conv-layers ${num_conv_layers} \
                         --dataset ${dataset} \
                         --div ${div} \
+                        --log-to 'logs/%(rank+1)dof%(size)d.log' \
+                        --log-info "$info/%(rank+1)d" \
                         ${events} \
     3>&1 4>&2 2>&3- 1>&4- | tee /dev/stderr
 
+    wrh_pop 'trial'
+
     done
 
     done
@@ -181,6 +222,7 @@ go-trial() {
     done
     done
     done
+
 }
 
 go-docker() {

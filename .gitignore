@@ -3,3 +3,6 @@
 /stderr.txt
 /stdout.txt
 /spack.lock
+/_whatreallyhappened
+/horovod
+/logs
