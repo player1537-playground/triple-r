@@ -142,11 +142,24 @@ def main(events, div, num_conv_layers, dataset, default_verbosity, data_dir, che
         'rank+1': rank + 1,
     }, 'a')
 
-    wrh.load(log_info % {
-        'rank': rank,
-        'rank+1': rank + 1,
-        'size': size,
-    })
+    if log_info is not None:
+        wrh.load(log_info % {
+            'rank': rank,
+            'rank+1': rank + 1,
+            'size': size,
+        })
+    else:
+        if rank == 0:
+            wrh.push('master')
+            for i in range(1, size):
+                wrh.push('worker')
+                info = wrh.save()
+                world.send(info, dest=i, tag=i)
+                wrh.pop('worker')
+            wrh.push('worker')
+        else:
+            info = world.recv(source=0, tag=rank)
+            wrh.load(info)
 
     wrh.push('triple-r.py')
     wrh.log('rank', '%d', rank)
@@ -201,13 +214,19 @@ def main(events, div, num_conv_layers, dataset, default_verbosity, data_dir, che
     callbacks = [
         hvd.callbacks.BroadcastGlobalVariablesCallback(0),
         hvd.callbacks.MetricAverageCallback(),
-        PreciseEarlyStopping(nepochs=3, nbatches=13),
+        PreciseEarlyStopping(nepochs=-1, nbatches=-1),
     ]
 
     if rank == 0:
-        callbacks.append(tf.keras.callbacks.ModelCheckpoint(checkpoint_dir / 'checkpoint.h5', save_weights_only=False))
+        pass # callbacks.append(tf.keras.callbacks.ModelCheckpoint(checkpoint_dir / 'checkpoint.h5', save_weights_only=False))
 
-    events.insert(0, Event(nepochs=0, nworkers=size, batch=32, reload=False))
+    if rank == 0:
+        wrh.push('checkpoint')
+        weights = checkpoint_dir / 'checkpoint.h5'
+        model.save(weights)
+        wrh.pop('checkpoint')
+
+    #events.insert(0, Event(nepochs=0, nworkers=size, batch=32, reload=False))
 
     initial_epoch = 0
     for event in events:
@@ -280,11 +299,21 @@ def main(events, div, num_conv_layers, dataset, default_verbosity, data_dir, che
             wrh.log(name, '%r', value)
         wrh.pop('test')
 
+        if event.checkpoint and rank == 0:
+            wrh.push('checkpoint')
+            weights = checkpoint_dir / 'checkpoint.h5'
+            model.save(weights)
+            wrh.pop('checkpoint')
+
         initial_epoch += event.nepochs
 
         wrh.pop('event')
 
     wrh.pop('triple-r.py')
+
+    if rank == 0:
+        wrh.pop('worker')
+        wrh.pop('master')
 
 
 @dataclass
@@ -293,6 +322,7 @@ class Event:
     nworkers: int
     batch: int
     reload: bool
+    checkpoint: bool
  
     @classmethod
     def parse(cls, s):
@@ -307,8 +337,9 @@ class Event:
             nworkers = int(nworkers)
         batch = int(options.get('batch', 32))
         reload = bool(options.get('reload', False))
+        checkpoint = bool(options.get('checkpoint', False))
 
-        return cls(nepochs, nworkers, batch, reload)
+        return cls(nepochs, nworkers, batch, reload, checkpoint)
 
 
 def cli():
@@ -330,7 +361,7 @@ def cli():
     parser.add_argument('--data-dir', required=True)
     parser.add_argument('--checkpoint-dir', required=True, type=Path)
     parser.add_argument('--log-to', required=True, type=Path)
-    parser.add_argument('--log-info', required=True)
+    parser.add_argument('--log-info', required=False)
     args = vars(parser.parse_args())
 
     main(**args)

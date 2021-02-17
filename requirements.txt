@@ -3,5 +3,5 @@ tensorflow_datasets
 numpy
 scipy
 matplotlib
-horovod
 mpi4py
+horovod
