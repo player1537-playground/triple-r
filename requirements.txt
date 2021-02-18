@@ -5,3 +5,4 @@ scipy
 matplotlib
 horovod
 mpi4py
+typing_extensions
