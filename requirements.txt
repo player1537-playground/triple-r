@@ -3,6 +3,6 @@ tensorflow_datasets
 numpy
 scipy
 matplotlib
-horovod
 mpi4py
 typing_extensions
+horovod

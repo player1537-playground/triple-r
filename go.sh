@@ -14,9 +14,34 @@ tag=horovod_$USER
 registry=accona.eecs.utk.edu:5000
 whatreallyhappened=${root:?}/_whatreallyhappened
 host=
-python=$(which python3.8)
+python=$(which python3.8 2>/dev/null)
+simg=${root:?}/tensorflow-20.12-tf2-py3.simg
+stag=docker://nvcr.io/nvidia/tensorflow:20.12-tf2-py3
+scache=${root:?}/scache
+stmp=${root:?}/stmp
 
 [ -f ${root:?}/env.sh ] && . ${root:?}/env.sh
+
+go-singularity() {
+    go-singularity-"$@"
+}
+
+go-singularity-build() {
+    SINGULARITY_CACHEDIR=${scache:?} \
+    SINGULARITY_TMPDIR=${stmp:?} \
+    singularity build \
+        ${simg:?} \
+        ${stag:?}
+}
+
+go-singularity-exec() {
+    singularity exec \
+        --nv \
+        -B /soft,/gpfs/mira-home/thobson,/home \
+        ${simg:?} \
+        ./go.sh \
+        "$@"
+}
 
 go-spack() {
     if ! [ -x ${spack:?}/bin/spack ]; then
@@ -40,19 +65,19 @@ go-horovod() {
 
 go-whatreallyhappened() {
     : ${SPACK_ENV:?I need to be run in a Spack environment}
-    : ${VIRTUAL_ENV:?need to be run inside a virtual env}
+    #: ${VIRTUAL_ENV:?need to be run inside a virtual env}
     if ! [ -f ${whatreallyhappened:?}/go.sh ]; then
         git clone https://github.com/player1537-playground/whatreallyhappened.git ${whatreallyhappened:?}
     fi
 
     if [ $# -gt 0 ]; then
-        (cd ${whatreallyhappened:?} && ./go.sh "$@")
+        (. ${venv:?}/bin/activate && cd ${whatreallyhappened:?} && ./go.sh "$@")
     fi
 }
 
 go-venv() {
     : ${SPACK_ENV:?I need to be run in a Spack environment}
-    ! [ "${python#${SPACK_ENV:?}}" = "${python:?}" ] || die "Expected ${python} to start with ${SPACK_ENV}"
+    #! [ "${python#${SPACK_ENV:?}}" = "${python:?}" ] || die "Expected ${python} to start with ${SPACK_ENV}"
     if ! ${python:?} -c 'import virtualenv' &>/dev/null; then
         if ! ${python:?} -c 'import pip' &>/dev/null; then
             if ! ${python:?} -c 'import ensurepip' &>/dev/null; then
@@ -84,7 +109,7 @@ go-make() {
 }
 
 go-exec() {
-    : ${SPACK_ENV:?I need to be run in a Spack environment}
+    #: ${SPACK_ENV:?I need to be run in a Spack environment}
     exec "$@"
 }
 
@@ -135,12 +160,16 @@ go-redirect() (
     exec "$@"
 )
 
-go-trial() {
-    : ${SPACK_ENV:?I need to be run in a Spack environment}
-    ! [ "${python#${SPACK_ENV:?}}" = "${python:?}" ] || die "Expected ${python} to start with ${SPACK_ENV}"
-    source whatreallyhappened.bash || die "Could not load whatreallyhappened.bash"
+go-cobalt() {
+    LD_PRELOAD= \
+    time \
+        ${root:?}/go.sh \
+            trial
+}
 
-    wrh_open logs/main.log a
+go-trial() {
+    #: ${SPACK_ENV:?I need to be run in a Spack environment}
+    #! [ "${python#${SPACK_ENV:?}}" = "${python:?}" ] || die "Expected ${python} to start with ${SPACK_ENV}"
 
     exec > >(tee -a stdout.txt)
     exec 2> >(tee -a stderr.txt >/dev/stderr)
@@ -159,18 +188,39 @@ go-trial() {
     printf $'\n' >&2
     printf $'====\n' >&2
 
-    columns=( dataset div num_conv_layers nepochs1 nworkers1 mode )
+    columns=( dataset div num_conv_layers nepochs nworkers ckpt_freq failure_epoch mode )
     printf $'%s,' "${columns[@]}"
     printf $'real,user,sys\n'
 
     for dataset in emnist; do
-    for div in 100; do
+    for div in 1; do
     for num_conv_layers in 2; do
-    for nepochs1 in 10; do
-    for nworkers1 in 5; do
-    for nepochs2 in ${nepochs1}; do
-    for nworkers2 in ${nworkers1}; do
-    for events in "${nepochs1}e/nworkers=${nworkers1} ${nepochs2}e/nworkers=${nworkers2},reload=True"; do
+    for nepochs in 64; do
+    for nworkers in 8; do
+    for ckpt_freq in 1 2 4 8 16; do
+    for failure_epoch in {4..64..8}; do
+
+    events=()
+    did_failure=0
+    since_last_ckpt=0
+    for ((i=1; i<=nepochs; ++i)); do
+        event="1e/nworkers=${nworkers}"
+        if ((!did_failure && i == failure_epoch)); then
+            event+=",reload=True"
+            did_failure=1
+            (( i -= since_last_ckpt ))
+        fi
+        (( since_last_ckpt++ ))
+        if ((i % ckpt_freq == 0)); then
+            event+=",checkpoint=True"
+            since_last_ckpt=0
+        fi
+        events+=( "${event}" )
+    done
+    OIFS=$IFS
+    IFS=$' '
+    events="${events[*]}"
+    IFS=$OIFS
 
     for mode in test; do
 
@@ -178,43 +228,31 @@ go-trial() {
         printf $'%s,' "${!c}" | tee /dev/stderr
     done
 
-    wrh_push 'trial'
-    for c in "${columns[@]}"; do
-        wrh_log "$c" "${!c}"
-    done
-
     rm -rf "${checkpoint:?}"
     mkdir "${checkpoint:?}"
 
-    wrh_save -n info
+    sleep 1 || return
     
-    /usr/bin/time \
-    --format='%e,%U,%S' \
-        ${root:?}/go.sh redirect \
-        -e /dev/stdout \
-            $(which mpirun) \
-            -np 5 \
-            -host ${host:?} \
-            -iface eno1 \
-                    ${venv:?}/bin/python \
-                    -u \
-                        triple-r.py \
-                        --data-dir ${data:?} \
-                        --checkpoint-dir ${checkpoint:?} \
-                        --default-verbosity 2 \
-                        --num-conv-layers ${num_conv_layers} \
-                        --dataset ${dataset} \
-                        --div ${div} \
-                        --log-to 'logs/%(rank+1)dof%(size)d.log' \
-                        --log-info "$info/%(rank+1)d" \
-                        ${events} \
-    3>&1 4>&2 2>&3- 1>&4- | tee /dev/stderr
-
-    wrh_pop 'trial'
+    $(which mpirun) \
+    -np ${nworkers} \
+    -host ${host:?} \
+    ${iface:+-iface ${iface:?}} \
+        ${root:?}/go.sh singularity exec env \
+            ${whatreallyhappened:?}/go.sh exec \
+                ${venv:?}/bin/python \
+                -u \
+                    triple-r.py \
+                    --data-dir ${data:?} \
+                    --checkpoint-dir ${checkpoint:?} \
+                    --default-verbosity 2 \
+                    --num-conv-layers ${num_conv_layers} \
+                    --dataset ${dataset} \
+                    --div ${div} \
+                    --log-to 'logs/%(rank+1)dof%(size)d.log' \
+                    ${events}
 
     done
 
-    done
     done
     done
     done
