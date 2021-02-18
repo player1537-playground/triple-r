@@ -305,6 +305,8 @@ def main(events, div, num_conv_layers, dataset, default_verbosity, data_dir, che
             model.save(weights)
             wrh.pop('checkpoint')
 
+        world.Barrier()
+
         initial_epoch += event.nepochs
 
         wrh.pop('event')
