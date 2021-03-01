@@ -37,7 +37,7 @@ go-singularity-build() {
 go-singularity-exec() {
     singularity exec \
         --nv \
-        -B /soft,/gpfs/mira-home/thobson,/home \
+        -B /soft,/gpfs/mira-home/thobson,/home,/lus \
         ${simg:?} \
         ./go.sh \
         "$@"
@@ -188,17 +188,17 @@ go-trial() {
     printf $'\n' >&2
     printf $'====\n' >&2
 
-    columns=( dataset div num_conv_layers nepochs nworkers ckpt_freq failure_epoch mode )
+    columns=( dataset model div nepochs nworkers ckpt_freq failure_epoch mode )
     printf $'%s,' "${columns[@]}"
     printf $'real,user,sys\n'
 
-    for dataset in emnist; do
-    for div in 1; do
-    for num_conv_layers in 2; do
-    for nepochs in 64; do
-    for nworkers in 8; do
-    for ckpt_freq in 1 2 4 8 16; do
-    for failure_epoch in {4..64..8}; do
+    for dataset in tiny-imagenet; do
+    for div in 100; do
+    for model in ResNet50; do
+    for nepochs in 16; do
+    for nworkers in 4; do
+    for ckpt_freq in 2; do
+    for failure_epoch in 3; do
 
     events=()
     did_failure=0
@@ -242,11 +242,11 @@ go-trial() {
                 ${venv:?}/bin/python \
                 -u \
                     triple-r.py \
+                    --dataset ${dataset} \
+                    --model ${model:?} \
                     --data-dir ${data:?} \
                     --checkpoint-dir ${checkpoint:?} \
                     --default-verbosity 2 \
-                    --num-conv-layers ${num_conv_layers} \
-                    --dataset ${dataset} \
                     --div ${div} \
                     --log-to 'logs/%(rank+1)dof%(size)d.log' \
                     ${events}

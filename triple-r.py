@@ -11,7 +11,7 @@ from time import sleep
 from typing import Tuple, Optional
 
 logging.basicConfig()
-logging.getLogger().setLevel(logging.DEBUG)
+logging.getLogger().setLevel(logging.INFO)
 
 import horovod.tensorflow.keras as hvd
 from horovod.tensorflow import join as hvd_join, _executing_eagerly
@@ -131,7 +131,35 @@ class PreciseEarlyStopping(tf.keras.callbacks.Callback):
             self.model.stop_training = True
 
 
-def main(events, div, num_conv_layers, dataset, default_verbosity, data_dir, checkpoint_dir, log_to, log_info):
+def make_resnet50_model(input_shape: Tuple[int, ...],
+                        output_shape: int):
+    model = tf.keras.applications.ResNet50(
+        weights=None,  # random initialization
+        input_shape=input_shape,
+        classes=output_shape,
+        include_top=True,  # include fully-connected layer
+    )
+
+    # Thanks https://github.com/bnicolae/ai-apps/blob/master/resnet-50/keras_resnet50.py#L120-L131
+    # ResNet-50 model that is included with Keras is optimized for inference.
+    # Add L2 weight decay & adjust BN settings.
+    model_config = model.get_config()
+    for layer, layer_config in zip(model.layers, model_config['layers']):
+        if hasattr(layer, 'kernel_regularizer'):
+            regularizer = tf.keras.regularizers.l2(0.00005)
+            layer_config['config']['kernel_regularizer'] = \
+                {'class_name': regularizer.__class__.__name__,
+                 'config': regularizer.get_config()}
+        if type(layer) == tf.keras.layers.BatchNormalization:
+            layer_config['config']['momentum'] = 0.9
+            layer_config['config']['epsilon'] = 1e-5
+
+    model = tf.keras.models.Model.from_config(model_config)
+
+    return model
+
+
+def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, checkpoint_dir, log_to, log_info):
     world = MPI.COMM_WORLD
     rank = world.Get_rank()
     size = world.Get_size()
@@ -164,10 +192,10 @@ def main(events, div, num_conv_layers, dataset, default_verbosity, data_dir, che
     wrh.push('triple-r.py')
     wrh.log('rank', '%d', rank)
     wrh.log('size', '%d', size)
+    wrh.log('model', '%s', make_model_fn)
+    wrh.log('dataset', '%s', dataset)
     wrh.log('events', '%s', events)
     wrh.log('div', '%d', div)
-    wrh.log('num_conv_layers', '%d', num_conv_layers)
-    wrh.log('dataset', '%s', dataset)
     wrh.log('data_dir', '%s', data_dir)
     wrh.log('checkpoint_dir', '%s', checkpoint_dir)
 
@@ -182,32 +210,75 @@ def main(events, div, num_conv_layers, dataset, default_verbosity, data_dir, che
 
     #print(f'{hvd.
 
+    is_emnist = dataset in ('emnist',)
+    is_tiny_imagenet = dataset in ('tiny-imagenet',)
+
     wrh.push('loading dataset')
-    datasets, info = tfds.load(
-        dataset,
-        split=None,
-        with_info=True,
-        as_supervised=True,
-        data_dir=data_dir,
-        download=True,
-    )
-    wrh.log('datasets', '%r', datasets)
-    wrh.log('info', '%r', info)
+    train_ds = None
+    valid_ds = None
+    if is_emnist:
+        datasets, info = tfds.load(
+            dataset,
+            split=None,
+            with_info=True,
+            as_supervised=True,
+            data_dir=str(data_dir),
+            download=True,
+        )
+        wrh.log('datasets', '%r', datasets)
+        wrh.log('info', '%r', info)
+        input_shape = info.features['image'].shape
+        output_shape = info.features['label'].num_classes
+        train_ds = datasets['train']
+        valid_ds = datasets['valid']
+
+        train_ds = train_ds.map(lambda img, label: (tf.image.convert_image_dtype(img, dtype=tf.float32), label))
+        valid_ds = valid_ds.map(lambda img, label: (tf.image.convert_image_dtype(img, dtype=tf.float32), label))
+
+        num_train = info.splits['train'].num_examples
+        num_valid = info.splits['validation'].num_examples
+    elif is_tiny_imagenet:
+        # Training data iterator.
+        input_shape = (224, 224, 3)
+        output_shape = 200
+
+        num_train = 100000
+        num_valid = 10000
+
+        train_dir = data_dir / "tiny-imagenet-200/train"
+        valid_dir = data_dir / "tiny-imagenet-200/val"
+
+        train_gen = tf.keras.preprocessing.image.ImageDataGenerator(
+            width_shift_range=0.33, height_shift_range=0.33, zoom_range=0.5, horizontal_flip=True,
+            preprocessing_function=tf.keras.applications.resnet50.preprocess_input)
+
+        train_ds = tf.data.Dataset.from_generator(
+            lambda: train_gen.flow_from_directory(train_dir,
+                                                  batch_size=1,
+                                                  target_size=input_shape[:-1]),
+            output_signature=(tf.TensorSpec(shape=input_shape, dtype=tf.float32),
+                              tf.TensorSpec(shape=(output_shape,), dtype=tf.int32)),
+        ).map(lambda x, y: (x.reshape(x.shape[1:]), y))
+
+        # Validation data iterator.
+        valid_gen = tf.keras.preprocessing.image.ImageDataGenerator(
+            zoom_range=(0.875, 0.875), preprocessing_function=tf.keras.applications.resnet50.preprocess_input)
+        train_ds = tf.data.Dataset.from_generator(
+            lambda: valid_gen.flow_from_directory(valid_dir,
+                                                  batch_size=1,
+                                                  target_size=input_shape[:-1]),
+            output_signature=(tf.TensorSpec(shape=input_shape, dtype=tf.float32),
+                              tf.TensorSpec(shape=(output_shape,), dtype=tf.int32)),
+        ).map(lambda x, y: (x.reshape(x.shape[1:]), y))
+        
     wrh.pop('loading dataset')
 
-    train_ds = datasets['train']
-    test_ds = datasets['test']
-
-    train_ds = train_ds.map(lambda img, label: (tf.image.convert_image_dtype(img, dtype=tf.float32), label))
-    test_ds = test_ds.map(lambda img, label: (tf.image.convert_image_dtype(img, dtype=tf.float32), label))
-
     wrh.push('creating model')
-    wrh.log('input_shape', '%r', info.features['image'].shape)
-    wrh.log('output_shape', '%r', info.features['label'].num_classes)
-    model = make_simple_cnn_model(
-        input_shape=info.features['image'].shape,
-        output_shape=info.features['label'].num_classes,
-        num_conv_layers=num_conv_layers,
+    wrh.log('input_shape', '%r', input_shape)
+    wrh.log('output_shape', '%r', output_shape)
+    model = make_model_fn(
+        input_shape=input_shape,
+        output_shape=output_shape,
     )
     wrh.pop('creating model')
 
@@ -278,7 +349,7 @@ def main(events, div, num_conv_layers, dataset, default_verbosity, data_dir, che
         wrh.push('train')
         model.fit(
             train_ds.repeat().batch(event.batch),
-            steps_per_epoch=info.splits['train'].num_examples // event.batch // event.nworkers // div,
+            steps_per_epoch=num_train // event.batch // event.nworkers // div,
             callbacks=callbacks,
             epochs=initial_epoch + event.nepochs,
             initial_epoch=initial_epoch,
@@ -286,10 +357,10 @@ def main(events, div, num_conv_layers, dataset, default_verbosity, data_dir, che
         )
         wrh.pop('train')
 
-        wrh.push('test')
+        wrh.push('valid')
         stats = model.evaluate(
-            test_ds.repeat().batch(event.batch),
-            steps=info.splits['test'].num_examples // event.batch // event.nworkers // div,
+            valid_ds.repeat().batch(event.batch),
+            steps=num_valid // event.batch // event.nworkers // div,
             callbacks=callbacks,
             verbose=default_verbosity if hvd.rank() == 0 else 0,
         )
@@ -297,7 +368,7 @@ def main(events, div, num_conv_layers, dataset, default_verbosity, data_dir, che
             print(f'stats = {" ".join(f"{name}={value}" for name, value in zip(model.metrics_names, stats))}')
         for name, value in zip(model.metrics_names, stats):
             wrh.log(name, '%r', value)
-        wrh.pop('test')
+        wrh.pop('valid')
 
         if event.checkpoint and rank == 0:
             wrh.push('checkpoint')
@@ -351,16 +422,27 @@ def cli():
         except Exception as e:
             print(e)
             raise argparse.ArgumentError() from e
+    
+    def make_model_fn(s):
+        if s.startswith('CNN-'):
+            num_conv_layers = int(s[len('CNN-'):])
+            fn = partial(make_simple_cnn_model, num_conv_layers=num_conv_layers)
+
+        elif s == 'ResNet50':
+            fn = make_resnet50_model
+
+        fn.__name__ = s
+        return fn
 
     import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument('events', nargs='+', type=event)
-    parser.add_argument('--div', required=True, type=int)
-    parser.add_argument('--num-conv-layers', required=True, type=int)
+    parser.add_argument('--model', dest='make_model_fn', required=True, type=make_model_fn)
     parser.add_argument('--dataset', required=True)
+    parser.add_argument('--div', required=True, type=int)
     parser.add_argument('--default-verbosity', required=True)
-    parser.add_argument('--data-dir', required=True)
+    parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--checkpoint-dir', required=True, type=Path)
     parser.add_argument('--log-to', required=True, type=Path)
     parser.add_argument('--log-info', required=False)

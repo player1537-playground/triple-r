@@ -115,15 +115,28 @@ class Tree:
     ''', re.VERBOSE)
 
     @classmethod
-    def readiter(cls, infiles: List[Path]) -> Iterator[Tree]:
-        with subprocess_as_stdin([
-            'sort',
-            '-t\t',      # tab delimited
-            '-k1,1.36',  # sort by first column, first 36 characters (task id)
-            '-k1.36V',   # sort by first column, characters after first 36, as a version (task levels)
-            '-k2,2n',    # sort by second column, as a number (timestamp)
-            *infiles,    # sort these files
-        ]):
+    def readiter(cls, infiles: List[Path], *, presorted: bool=False) -> Iterator[Tree]:
+        if not presorted:
+            args = [
+                'sort',
+                '-t\t',      # tab delimited
+                '-k1,1.36',  # sort by first column, first 36 characters (task id)
+                '-k1.36V',   # sort by first column, characters after first 36, as a version (task levels)
+                '-k2,2n',    # sort by second column, as a number (timestamp)
+                *infiles,    # sort these files
+            ]
+        else:
+            args = [
+                'sort',
+                '-t\t',      # tab delimited
+                '-k1,1.36',  # sort by first column, first 36 characters (task id)
+                '-k1.36V',   # sort by first column, characters after first 36, as a version (task levels)
+                '-k2,2n',    # sort by second column, as a number (timestamp)
+                '-m',        # merge already sorted files
+                *infiles,    # sort these files
+            ]
+            
+        with subprocess_as_stdin(args):
             last_task_id = None
             last_task_level = None
             last_timestamp = None
@@ -281,31 +294,46 @@ class EpochPattern:
     epoch: Any
     loss: Any
     accuracy: Any
-    children: List[BatchPattern]
+    #children: List[BatchPattern]
 
 
 class TrainPattern:
     started: Tuple[Any, Literal['epoch']]
     finished: Tuple[Any, Literal['epoch']]
-    children: List[Recursive[BatchPattern]]
+    #children: List[Recursive[BatchPattern]]
 
 
 class TrialPattern:
     started: Tuple[Any, Literal['trial']]
     finished: Tuple[Any, Literal['trial']]
-    children: List[Recursive[TrainPattern]]
+    #children: List[Recursive[TrainPattern]]
 
 
 class TripleRPattern:
     started: Tuple[Any, Literal['triple-r.py']]
     finished: Tuple[Any, Literal['triple-r.py']]
+
+
+class MasterPattern:
+    started: Tuple[Any, Literal['master']]
+    finished: Tuple[Any, Literal['master']]
+    #children: List[WorkerPattern]
+
+
+class WorkerPattern:
+    started: Tuple[Any, Literal['worker']]
+    finished: Tuple[Any, Literal['worker']]
+    #children: List[TripleRPattern]
+    
     
 
 
-def main(outfile, infiles):
+def main(outfile, infiles, presorted):
     writer = csv.writer(outfile)
 
-    for tree in Tree.readiter(infiles):
+    event_lookup = {}
+
+    for tree in Tree.readiter(infiles, presorted=presorted):
         Epoch = NewType('Epoch', int)
         Batch = NewType('Batch', int)
         Seconds = NewType('Seconds', float)
@@ -315,10 +343,6 @@ def main(outfile, infiles):
         per_epoch: Dict[Tuple[Epoch], Tuple[Seconds, Loss, Accuracy]] = {}
         per_batch: Dict[Tuple[Epoch, Batch], Tuple[Seconds, Loss]] = {}
         parameters = {}
-
-        match = next(tree.match(Recursive[TripleRPattern]), None)
-        if match is not None:
-            parameters['events'] = match.values['events']
 
         for trial in tree.match(Recursive[TripleRPattern]):
             total_trial_time = (trial.times['finished'] - trial.times['started']).total_seconds()
@@ -338,17 +362,42 @@ def main(outfile, infiles):
                             float(batch.values['loss']),
                         )
 
+        if 'events' in parameters:
+            events = parameters['events']
+            if events not in event_lookup:
+                event_lookup[events] = len(event_lookup)
+            parameters['events'] = event_lookup[events]
+        
+        if 'data_dir' in parameters:
+            parameters.pop('data_dir')
+        
+        if 'checkpoint_dir' in parameters:
+            parameters.pop('checkpoint_dir')
+        
+        if 'hvd.mpi_threads_supported' in parameters:
+            parameters.pop('hvd.mpi_threads_supported')
+        
+        if '_executing_eagerly' in parameters:
+            parameters.pop('_executing_eagerly')
+
         print(parameters)
+        parameter_names = sorted(parameters.keys())
+        parameter_values = [parameters[k] for k in parameter_names]
 
         writer.writerow(['=== EPOCH ==='])
-        writer.writerow(['epoch', 'seconds', 'loss', 'accuracy'])
+        writer.writerow([*parameter_names, 'epoch', 'seconds', 'loss', 'accuracy'])
         for key, row in per_epoch.items():
-            writer.writerow([*key, *row])
+            writer.writerow([*parameter_values, *key, *row])
 
         writer.writerow(['=== BATCH ==='])
-        writer.writerow(['epoch', 'batch', 'seconds', 'loss'])
+        writer.writerow([*parameter_names, 'epoch', 'batch', 'seconds', 'loss'])
         for key, row in per_batch.items():
-            writer.writerow([*key, *row])
+            writer.writerow([*parameter_values, *key, *row])
+
+    writer.writerow(['=== EVENTS ==='])
+    writer.writerow(['id', 'event'])
+    for event, id in event_lookup.items():
+        writer.writerow([id, event])
 
 
 def cli():
@@ -356,6 +405,7 @@ def cli():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--outfile', '-o', default=sys.stdout, type=argparse.FileType('w'))
+    parser.add_argument('--presorted', action='store_true')
     parser.add_argument('infiles', nargs='+', type=Path)
     args = vars(parser.parse_args())
 
