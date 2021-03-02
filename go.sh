@@ -192,13 +192,13 @@ go-trial() {
     printf $'%s,' "${columns[@]}"
     printf $'real,user,sys\n'
 
+    for nepochs in 8 16; do
+    for ckpt_freq in 4 3 2 1; do
+    for failure_epoch in 2 6; do
     for dataset in tiny-imagenet; do
-    for div in 100; do
+    for div in 1; do
     for model in ResNet50; do
-    for nepochs in 16; do
-    for nworkers in 4; do
-    for ckpt_freq in 2; do
-    for failure_epoch in 3; do
+    for nworkers in 8; do
 
     events=()
     did_failure=0
@@ -249,7 +249,8 @@ go-trial() {
                     --default-verbosity 2 \
                     --div ${div} \
                     --log-to 'logs/%(rank+1)dof%(size)d.log' \
-                    ${events}
+                    ${events} \
+    >&2
 
     done
 
@@ -318,6 +319,59 @@ go-process-log() {
     }
 
     _extract_from_end ${1:?need index from end} | _extract_csv
+}
+
+go-extract-tiny-imagenet() {
+	# Train looks like:
+	#   data/tiny-imagenet-200/train/
+	#   data/tiny-imagenet-200/train/n02437312
+	#   data/tiny-imagenet-200/train/n02437312/images
+	#   data/tiny-imagenet-200/train/n02437312/images/n02437312_273.JPEG
+	#   data/tiny-imagenet-200/train/n02437312/images/n02437312_192.JPEG
+	#   data/tiny-imagenet-200/train/n02437312/images/n02437312_418.JPEG
+	#   data/tiny-imagenet-200/train/n02437312/images/n02437312_404.JPEG
+	#   data/tiny-imagenet-200/train/n02437312/images/n02437312_30.JPEG
+	#   data/tiny-imagenet-200/train/n02437312/images/n02437312_269.JPEG
+	#   data/tiny-imagenet-200/train/n02437312/images/n02437312_239.JPEG
+
+	# Validation looks like:
+	#   data/tiny-imagenet-200/val/
+	#   data/tiny-imagenet-200/val/val_annotations.txt
+	#   data/tiny-imagenet-200/val/images
+	#   data/tiny-imagenet-200/val/images/val_9447.JPEG
+	#   data/tiny-imagenet-200/val/images/val_8152.JPEG
+	#   data/tiny-imagenet-200/val/images/val_9676.JPEG
+	#   data/tiny-imagenet-200/val/images/val_2518.JPEG
+	#   data/tiny-imagenet-200/val/images/val_251.JPEG
+	#   data/tiny-imagenet-200/val/images/val_6638.JPEG
+	#   data/tiny-imagenet-200/val/images/val_8046.JPEG
+
+	# val_annotations.txt looks like:
+	#   val_0.JPEG      n03444034       0       32      44      62
+	#   val_1.JPEG      n04067472       52      55      57      59
+	#   val_2.JPEG      n04070727       4       0       60      55
+	#   val_3.JPEG      n02808440       3       3       63      63
+	#   val_4.JPEG      n02808440       9       27      63      48
+	#   val_5.JPEG      n04399382       7       0       59      63
+	#   val_6.JPEG      n04179913       0       0       63      56
+	#   val_7.JPEG      n02823428       5       0       57      63
+	#   val_8.JPEG      n04146614       0       31      60      60
+	#   val_9.JPEG      n02226429       0       3       63      57
+
+	if ! [ -f ${data:?}/tiny-imagenet-200/val.bak/val_annotations.txt ]; then
+		mv \
+			${data:?}/tiny-imagenet-200/val \
+			${data:?}/tiny-imagenet-200/val.bak
+	fi
+
+	exec < ${data:?}/tiny-imagenet-200/val.bak/val_annotations.txt
+	while IFS=$'\t' read -r filename class bbox0 bbox1 bbox2 bbox3; do
+		orig=${data:?}/tiny-imagenet-200/val.bak/images/${filename:?}
+		new=${data:?}/tiny-imagenet-200/val/${class:?}/images/${filename:?}
+
+		mkdir -p ${new%/*}
+		ln -sf ${orig:?} ${new:?}
+	done
 }
 
 go-"$@"

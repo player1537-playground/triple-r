@@ -11,7 +11,8 @@ from time import sleep
 from typing import Tuple, Optional
 
 logging.basicConfig()
-logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().setLevel(logging.DEBUG)
+logging.getLogger('PIL.Image').setLevel(logging.ERROR)
 
 import horovod.tensorflow.keras as hvd
 from horovod.tensorflow import join as hvd_join, _executing_eagerly
@@ -22,6 +23,8 @@ import scipy as sp
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import whatreallyhappened as wrh
+
+np.set_string_function(lambda x: f'array(..., dtype={x.dtype}, shape={x.shape})')
 
 
 def make_simple_cnn_model(input_shape: Tuple[int, ...],
@@ -248,6 +251,22 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
         train_dir = data_dir / "tiny-imagenet-200/train"
         valid_dir = data_dir / "tiny-imagenet-200/val"
 
+        def drop_first_dimension(tensor: 'tf.Tensor') -> 'tf.Tensor':
+            #print(f'{tensor = }')
+            #shape = tensor.get_shape()
+            #print(f'{shape = }')
+            #tensor.set_shape(shape[1:])
+            return tensor
+
+        def add_first_dimension(tensor):
+            shape = tensor.get_shape()
+            tensor.set_shape([1, *shape])
+            return tensor
+
+        def debug(s: str, tensor: 'tf.Tensor') -> 'tf.Tensor':
+            print(f'{s}: {tensor = } (type = {type(tensor)})')
+            return tensor
+
         train_gen = tf.keras.preprocessing.image.ImageDataGenerator(
             width_shift_range=0.33, height_shift_range=0.33, zoom_range=0.5, horizontal_flip=True,
             preprocessing_function=tf.keras.applications.resnet50.preprocess_input)
@@ -256,20 +275,26 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
             lambda: train_gen.flow_from_directory(train_dir,
                                                   batch_size=1,
                                                   target_size=input_shape[:-1]),
-            output_signature=(tf.TensorSpec(shape=input_shape, dtype=tf.float32),
-                              tf.TensorSpec(shape=(output_shape,), dtype=tf.int32)),
-        ).map(lambda x, y: (x.reshape(x.shape[1:]), y))
+            output_signature=(tf.TensorSpec(shape=[1, *input_shape], dtype=tf.float32),
+                              tf.TensorSpec(shape=(1, output_shape,), dtype=tf.int32)),
+        ) \
+            .unbatch()
+            #.map(lambda x, y: (debug('before x', x), debug('before y', y))) \
+            #.map(lambda x, y: (debug('after x', x), debug('after y', y))) \
+            #.map(lambda x, y: (debug('unbatch x', x), debug('unbatch y', y))) \
+            #.map(lambda x, y: (x, tf.expand_dims(y, axis=0))) \
 
         # Validation data iterator.
         valid_gen = tf.keras.preprocessing.image.ImageDataGenerator(
             zoom_range=(0.875, 0.875), preprocessing_function=tf.keras.applications.resnet50.preprocess_input)
-        train_ds = tf.data.Dataset.from_generator(
+        valid_ds = tf.data.Dataset.from_generator(
             lambda: valid_gen.flow_from_directory(valid_dir,
                                                   batch_size=1,
                                                   target_size=input_shape[:-1]),
-            output_signature=(tf.TensorSpec(shape=input_shape, dtype=tf.float32),
-                              tf.TensorSpec(shape=(output_shape,), dtype=tf.int32)),
-        ).map(lambda x, y: (x.reshape(x.shape[1:]), y))
+            output_signature=(tf.TensorSpec(shape=[1, *input_shape], dtype=tf.float32),
+                              tf.TensorSpec(shape=(1, output_shape,), dtype=tf.int32)),
+        ) \
+            .unbatch()
         
     wrh.pop('loading dataset')
 
@@ -327,7 +352,7 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
         model.compile(
             optimizer=opt,
             metrics=['accuracy'],
-            loss=tf.losses.SparseCategoricalCrossentropy(from_logits=True),
+            loss=tf.losses.CategoricalCrossentropy(from_logits=True),
             experimental_run_tf_function=False,
         )
 
