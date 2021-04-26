@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import logging
 from pathlib import Path
 import re
-import subprocess
 from time import sleep
 from typing import Tuple, Optional
 
@@ -216,6 +215,7 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
 
     is_emnist = dataset in ('emnist',)
     is_tiny_imagenet = dataset in ('tiny-imagenet',)
+    is_candle = dataset in ('candle',)
 
     wrh.push('loading dataset')
     train_ds = None
@@ -242,14 +242,6 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
         num_train = info.splits['train'].num_examples
         num_valid = info.splits['validation'].num_examples
     elif is_tiny_imagenet:
-        subprocess.run([
-            'mkdir', '-p', '/dev/shm/metem/data',
-        ])
-
-        subprocess.run([
-            'tar', 'xf', '/lus/theta-fs0/projects/VeloC/metem/data/tiny-imagenet-200.tar.gz',
-        ], cwd='/dev/shm/metem/data')
-
         # Training data iterator.
         input_shape = (224, 224, 3)
         output_shape = 200
@@ -287,9 +279,7 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
             output_signature=(tf.TensorSpec(shape=[1, *input_shape], dtype=tf.float32),
                               tf.TensorSpec(shape=(1, output_shape,), dtype=tf.int32)),
         ) \
-            .unbatch() \
-            .cache() \
-            .shuffle(num_train)
+            .unbatch()
             #.map(lambda x, y: (debug('before x', x), debug('before y', y))) \
             #.map(lambda x, y: (debug('after x', x), debug('after y', y))) \
             #.map(lambda x, y: (debug('unbatch x', x), debug('unbatch y', y))) \
@@ -305,9 +295,10 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
             output_signature=(tf.TensorSpec(shape=[1, *input_shape], dtype=tf.float32),
                               tf.TensorSpec(shape=(1, output_shape,), dtype=tf.int32)),
         ) \
-            .unbatch() \
-            .cache() \
-            .shuffle(num_valid)
+            .unbatch()
+
+    elif is_candle:
+        
         
     wrh.pop('loading dataset')
 

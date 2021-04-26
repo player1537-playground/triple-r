@@ -7,6 +7,8 @@ build=${root:?}/build
 venv=${root:?}/venv
 spack=${root:?}/spack
 data=${root:?}/data
+logs=${root:?}/logs
+jobs=${root:?}/jobs
 checkpoint=${root:?}/checkpoint
 horovod=${root:?}/horovod
 basetag=horovod/horovod:0.20.0-tf2.3.0-torch1.6.0-mxnet1.5.0-py3.7-cpu
@@ -37,9 +39,9 @@ go-singularity-build() {
 go-singularity-exec() {
     singularity exec \
         --nv \
-        -B /soft,/gpfs/mira-home/thobson,/home,/lus \
+        -B /soft,/gpfs/mira-home/thobson,/home,/lus,/scratch \
         ${simg:?} \
-        ./go.sh \
+        ${root:?}/go.sh \
         "$@"
 }
 
@@ -167,6 +169,92 @@ go-cobalt() {
             trial
 }
 
+go-genjobs() {
+    go-onetrial() {
+        njobs=$(ls -lah ${jobs:?}/*.sh 2>/dev/null | wc -l)
+        cat <<EOF >jobs/job_${njobs}.sh
+#!/usr/bin/env bash
+#COBALT -t $((2 * 60))
+#COBALT -n ${nworkers:?}
+#COBALT -q default
+#COBALT --attrs=pubnet:nox11
+#COBALT -O ${jobs:?}/job_${njobs}
+
+dataset=${dataset:?}
+model=${model:?}
+div=${div:?}
+nepochs=${nepochs:?}
+nworkers=${nworkers:?}
+ckpt_freq=${ckpt_freq:?}
+failure_epoch=${failure_epoch:?}
+mode=${mode:?}
+name=${name:?}
+
+. ${root:?}/go.sh onetrial
+EOF
+        chmod +x ${jobs:?}/job_${njobs}.sh
+    }
+
+    mkdir -p ${jobs:?}
+    go-trial
+}
+
+go-onetrial() {
+    events=()
+    did_failure=0
+    since_last_ckpt=0
+    for ((i=1; i<=nepochs; ++i)); do
+        event="1e/nworkers=${nworkers:?}"
+        if ((!did_failure && i == failure_epoch)); then
+            if [ ${#events[@]} -gt 0 ]; then
+                events[${#events[@]}-1]+=",checkpoint=True"
+            fi
+            event+=",reload=True"
+            did_failure=1
+            (( i -= since_last_ckpt ))
+        fi
+        (( since_last_ckpt++ ))
+        if ((ckpt_freq != 0 && i % ckpt_freq == 0)); then
+            event+=",checkpoint=True"
+            since_last_ckpt=0
+        fi
+        events+=( "${event}" )
+    done
+    OIFS=$IFS
+    IFS=$' '
+    events="${events[*]}"
+    IFS=$OIFS
+
+    rm -rf "${checkpoint:?}"
+    mkdir "${checkpoint:?}"
+
+    sleep 1 || return 1
+
+    mkdir -p ${logs:?}/${name:?}
+
+    mkdir -p /dev/shm/metem/data
+    (cd /dev/shm/metem/data && tar xf ${data:?}/tiny-imagenet-200.tar.gz)
+    
+    $(which mpirun) \
+    -np ${nworkers} \
+    -host ${host:?} \
+    ${iface:+-iface ${iface:?}} \
+        ${root:?}/go.sh singularity exec env \
+            ${whatreallyhappened:?}/go.sh exec \
+                ${venv:?}/bin/python \
+                -u \
+                    triple-r.py \
+                    --dataset ${dataset:?} \
+                    --model ${model:?} \
+                    --data-dir /dev/shm/metem/data \
+                    --checkpoint-dir ${checkpoint:?} \
+                    --default-verbosity 2 \
+                    --div ${div} \
+                    --log-to ${logs:?}/${name:?}/'%(rank+1)dof%(size)d.log' \
+                    ${events} \
+    >&2
+}
+
 go-trial() {
     #: ${SPACK_ENV:?I need to be run in a Spack environment}
     #! [ "${python#${SPACK_ENV:?}}" = "${python:?}" ] || die "Expected ${python} to start with ${SPACK_ENV}"
@@ -192,68 +280,24 @@ go-trial() {
     printf $'%s,' "${columns[@]}"
     printf $'real,user,sys\n'
 
-    for nepochs in 8 16; do
-    for ckpt_freq in 4 3 2 1; do
-    for failure_epoch in 2 6; do
+    for nepochs in 8; do
+    for ckpt_freq in 4 3 2 1 0; do
+    for failure_epoch in 2 5; do
     for dataset in tiny-imagenet; do
     for div in 1; do
     for model in ResNet50; do
     for nworkers in 8; do
-
-    events=()
-    did_failure=0
-    since_last_ckpt=0
-    for ((i=1; i<=nepochs; ++i)); do
-        event="1e/nworkers=${nworkers}"
-        if ((!did_failure && i == failure_epoch)); then
-            event+=",reload=True"
-            did_failure=1
-            (( i -= since_last_ckpt ))
-        fi
-        (( since_last_ckpt++ ))
-        if ((i % ckpt_freq == 0)); then
-            event+=",checkpoint=True"
-            since_last_ckpt=0
-        fi
-        events+=( "${event}" )
-    done
-    OIFS=$IFS
-    IFS=$' '
-    events="${events[*]}"
-    IFS=$OIFS
-
     for mode in test; do
+    for name in immediate_backward_recovery,ckpt_freq=${ckpt_freq:?},failure_epoch=${failure_epoch:?}; do
 
     for c in "${columns[@]}"; do
         printf $'%s,' "${!c}" | tee /dev/stderr
     done
 
-    rm -rf "${checkpoint:?}"
-    mkdir "${checkpoint:?}"
-
-    sleep 1 || return
-    
-    $(which mpirun) \
-    -np ${nworkers} \
-    -host ${host:?} \
-    ${iface:+-iface ${iface:?}} \
-        ${root:?}/go.sh singularity exec env \
-            ${whatreallyhappened:?}/go.sh exec \
-                ${venv:?}/bin/python \
-                -u \
-                    triple-r.py \
-                    --dataset ${dataset} \
-                    --model ${model:?} \
-                    --data-dir ${data:?} \
-                    --checkpoint-dir ${checkpoint:?} \
-                    --default-verbosity 2 \
-                    --div ${div} \
-                    --log-to 'logs/%(rank+1)dof%(size)d.log' \
-                    ${events} \
-    >&2
+    go-onetrial || return 1
 
     done
-
+    done
     done
     done
     done
@@ -319,6 +363,60 @@ go-process-log() {
     }
 
     _extract_from_end ${1:?need index from end} | _extract_csv
+}
+
+go-stress-checkpoint() {
+    mkdir -p /dev/shm/metem/checkpoint
+    mkdir -p /scratch/metem/checkpoint
+
+    printf $'checkpoint_dir,iterations,model,format,log_to,mode,bytes,real,user,sys\n' | tee -a checkpoint.csv >&2
+
+    for checkpoint_dir in /scratch/metem/checkpoint; do
+    for model in Long-32-{10..50..10} Wide-{10240..51200..10240}; do
+    for iterations in 100; do
+    for format in hdf5 tensorflow; do
+    for log_to in /lus/theta-fs0/projects/VeloC/metem/logs/log.log; do
+
+    case "${format:?}" in
+    (hdf5)
+        iterations=100
+        ;;
+    (tensorflow)
+        iterations=25
+        ;;
+    esac
+
+    for mode in prime test test test; do
+
+    printf $'%s,%s,%s,%s,%s,%s,' ${checkpoint_dir:?} ${iterations:?} ${model:?} ${format:?} ${log_to:?} ${mode:?} | tee -a checkpoint.csv >&2
+
+    sleep 0.5 || break
+
+    LD_PRELOAD= \
+    /usr/bin/time \
+    --format='%e,%U,%S' \
+        ${root:?}/go.sh redirect \
+        -e /dev/stdout \
+            ${root:?}/go.sh singularity exec \
+                env \
+                    ${whatreallyhappened:?}/go.sh \
+                        exec \
+                            ${venv:?}/bin/python ${root:?}/checkpoint.py \
+                            --iterations ${iterations:?} \
+                            --checkpoint-dir ${checkpoint_dir:?} \
+                            --log-to ${log_to:?} \
+                            --model ${model:?} \
+                            --format ${format:?} \
+    2> >(tee -a checkpoint.csv >&2) \
+            100>&2
+
+    done
+
+    done
+    done
+    done
+    done
+    done
 }
 
 go-extract-tiny-imagenet() {
