@@ -2,9 +2,6 @@
 
 from importlib import import_module
 import logging
-logging.basicConfig()
-logging.getLogger().setLevel(logging.INFO)
-
 
 logger = logging.getLogger(__name__)
 
@@ -51,26 +48,3 @@ def monkeypatch(identifier):
         setattr(context, name, inner_func)
         return inner_func
     return wrapper
-
-
-@monkeypatch('wow.mod.Foo.bar')
-def bar(self, x, *, bar):
-    print(f'before')
-    bar(self, x)
-    print(f'after')
-
-
-from wow.mod import Foo
-foo = Foo()
-foo.bar('baz')
-
-
-@monkeypatch('wow.mod.bing')
-def bing(s, *, bing):
-    print(f'before')
-    bing(s)
-    print(f'after')
-
-
-from wow.mod import bing
-bing('ping')

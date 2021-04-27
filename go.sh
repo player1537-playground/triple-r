@@ -240,6 +240,7 @@ go-onetrial() {
     -host ${host:?} \
     ${iface:+-iface ${iface:?}} \
         ${root:?}/go.sh singularity exec env \
+        HOROVOD_TIMELINE=${root:?}/timeline.json \
             ${whatreallyhappened:?}/go.sh exec \
                 ${venv:?}/bin/python \
                 -u \

@@ -25,6 +25,8 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 import whatreallyhappened as wrh
 
+from monkeypatch import monkeypatch
+
 np.set_string_function(lambda x: f'array(..., dtype={x.dtype}, shape={x.shape})')
 
 
@@ -289,7 +291,7 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
         ) \
             .unbatch() \
             .cache() \
-            .shuffle(num_train)
+            .shuffle(10000)
             #.map(lambda x, y: (debug('before x', x), debug('before y', y))) \
             #.map(lambda x, y: (debug('after x', x), debug('after y', y))) \
             #.map(lambda x, y: (debug('unbatch x', x), debug('unbatch y', y))) \
@@ -307,7 +309,7 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
         ) \
             .unbatch() \
             .cache() \
-            .shuffle(num_valid)
+            .shuffle(10000)
         
     wrh.pop('loading dataset')
 
