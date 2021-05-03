@@ -342,6 +342,8 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
         wrh.push('event')
         wrh.log('event', '%r', event)
 
+        tf.random.set_seed(event.seed)
+
         opt = tf.keras.optimizers.Adam(0.001)
         print(f'{rank=} {opt.__class__ = }, {opt.__class__.__base__ = }')
 
@@ -438,6 +440,7 @@ class Event:
     checkpoint: bool
     ngradients: int
     nlayers: int
+    seed: int
  
     @classmethod
     def parse(cls, s):
@@ -459,8 +462,11 @@ class Event:
         nlayers = options.get('nlayers', None)
         if nlayers is not None:
             nlayers = int(nlayers)
+        seed = options.get('seed', None)
+        if seed is not None:
+            seed = int(seed)
 
-        return cls(nepochs, nworkers, batch, reload, checkpoint, ngradients, nlayers)
+        return cls(nepochs, nworkers, batch, reload, checkpoint, ngradients, nlayers, seed)
 
 
 def cli():

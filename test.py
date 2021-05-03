@@ -15,6 +15,7 @@ for s in (signal.SIGINT, signal.SIGTERM, signal.SIGSEGV, signal.SIGUSR1, signal.
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
+comm.Set_errhandler(MPI.ERRORS_RETURN)
 
 comm.Barrier()
 if rank >= 2:

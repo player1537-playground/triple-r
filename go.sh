@@ -204,7 +204,7 @@ go-onetrial() {
     did_failure=0
     since_last_ckpt=0
     for ((i=1; i<=nepochs; ++i)); do
-        event="1e/nworkers=${nworkers:?}"
+        event="1e/nworkers=${nworkers:?},seed=${seed:?}"
         if ((!did_failure && i == failure_epoch)); then
             if [ ${#events[@]} -gt 0 ]; then
                 events[${#events[@]}-1]+=",checkpoint=True"
