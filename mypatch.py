@@ -11,34 +11,28 @@ from horovod.tensorflow.mpi_ops import rank
 from horovod._keras import _PRE_TF_2_4_0
 
 
-_hvd_size = 1
-_abort_after_layer = None
-_abort_after_gradient = None
-_stop_after_layer = None
-_stop_after_gradient = None
+_divisor = 1
+_act_after_layer = None
+_act_after_gradient = None
+_action = None
 
 
 def set_params(**kwargs):
-    if kwargs['hvd_size'] is not None:
-        global _hvd_size
-        _hvd_size = kwargs['hvd_size']
+    if kwargs['divisor'] is not None:
+        global _divisor
+        _divisor = kwargs['divisor']
 
-    if kwargs['abort_after_layer'] is not None:
-        global _abort_after_layer
-        _abort_after_layer = kwargs['abort_after_layer']
+    if kwargs['act_after_layer'] is not None:
+        global _act_after_layer
+        _act_after_layer = kwargs['act_after_layer']
 
-    if kwargs['abort_after_gradient'] is not None:
-        global _abort_after_gradient
-        _abort_after_gradient = kwargs['abort_after_gradient']
+    if kwargs['act_after_gradient'] is not None:
+        global _act_after_gradient
+        _act_after_gradient = kwargs['act_after_gradient']
 
-    if kwargs['stop_after_layer'] is not None:
-        global _stop_after_layer
-        _stop_after_layer = kwargs['stop_after_layer']
-
-    if kwargs['stop_after_gradient'] is not None:
-        global _stop_after_gradient
-        _stop_after_gradient = kwargs['stop_after_gradient']
-
+    if kwargs['action'] is not None:
+        global _action
+        _action = kwargs['action']
 
 
 @monkeypatch('horovod._keras.create_distributed_optimizer')
@@ -47,6 +41,9 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
                                  op, backward_passes_per_step=1,
                                  average_aggregated_gradients=False,
                                  groups=None, *, create_distributed_optimizer):
+    # Force the Sum operation because we'll prescale manually for the average
+    op = hvd.Sum
+
     class _DistributedOptimizer(keras.optimizers.Optimizer):
         _HAS_AGGREGATE_GRAD = True
 
@@ -92,19 +89,9 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
             In DistributedOptimizer, get_gradients() is overriden to also
             allreduce the gradients before returning them.
             """
-            wrh.push('create_distributed_optimizer._DistributedOptimizer._compute_gradients')
-            wrh.log(f'loss', '%r', loss)
-            for i, x in enumerate(var_list):
-                wrh.log(f'var_list[{i}]', '%r', x)
-            wrh.log('_PRE_TF_2_4_0', '%r', _PRE_TF_2_4_0)
             if _PRE_TF_2_4_0:
                 ret = super(self.__class__, self)._compute_gradients(
                     loss, var_list, grad_loss, tape)
-                for i, (x, y) in enumerate(ret):
-                    wrh.log(f'allreduced_grads[{i}]', '%r', x)
-                    wrh.log(f'weights[{i}]', '%r', y)
-                wrh.log('ret', '%r', ret)
-                wrh.pop('create_distributed_optimizer._DistributedOptimizer._compute_gradients')
                 return ret
 
             tape = backprop.GradientTape() if tape is None else tape
@@ -122,48 +109,53 @@ def create_distributed_optimizer(keras, optimizer, name, device_dense, device_sp
                 def wrapper(inp):
                     nonlocal gradient_counter, layer_counter
 
-                    if _stop_after_layer is not None or _abort_after_layer is not None:
-                        if _stop_after_layer == layer_counter or _abort_after_layer == layer_counter:
-                            if _stop_after_gradient is not None or _abort_after_gradient is not None:
+                    do_action = False
+
+                    if _act_after_layer is not None:
+                        layer_counter += 1
+                        if _act_after_layer == layer_counter:
+                            if _act_after_gradient is None:
+                                do_action = True
+                                
+                            if _act_after_gradient is not None:
                                 gradient_counter += 1
 
-                                if gradient_counter >= _stop_after_layer:
-                                    return tf.zeros_like(inp)
+                                if gradient_counter >= _act_after_layer:
+                                    do_action = True
 
-                                elif gradient_counter >= _abort_after_layer:
-                                    raise tf.errors.AbortedError(None, None, 'abort after layers')
+                    elif _act_after_gradient is not None:
+                        gradient_counter += 1
 
-                            else:
-                                
+                        if gradient_counter >= _act_after_gradient:
+                            do_action = True
 
-
-                    _gradient_counter += 1
-                    _layer_counter += 1
-                    _counter += 1
-                    if _counter > 2:
-                        raise tf.errors.AbortedError(None, None, 'my personal error')
                     wrh.push('create_distributed_optimizer._DistributedOptimizer._compute_gradients.wrapper')
-                    ret = tf.divide(inp, _hvd_size)
+
+                    if do_action and _action == 'stop':
+                        wrh.log('stop', '%r', (layer_counter, gradient_counter))
+                        ret = tf.zeros_like(inp)
+                    elif do_action and _action == 'abort':
+                        wrh.log('abort', '%r', (layer_counter, gradient_counter))
+                        ret = tf.errors.AbortedError(None, None, 'act after layers')
+                    else:
+                        wrh.log('divisor', '%r', _divisor)
+                        ret = tf.divide(inp, _divisor)
+
                     wrh.pop('create_distributed_optimizer._DistributedOptimizer._compute_gradients.wrapper')
-                    return ret
+                    if isinstance(ret, tf.errors.OpError):
+                        raise ret
+                    else:
+                        return ret
 
                 return tf.py_function(wrapper, (tensor,), tensor.dtype)
                 
             grads = list(grads)
             for i, grad in enumerate(grads):
-                wrh.log('grads[{i}]', '%r', grad)
                 grads[i] = make_wrapper(grad)
 
             allreduced_grads = self._allreduce(grads, weights)
             ret = list(zip(allreduced_grads, weights))
 
-            for i, (x, y) in enumerate(ret):
-                wrh.log(f'allreduced_grads[{i}]', '%r', x)
-                wrh.log(f'allreduced_grads[{i}].op', '%r', x.op)
-                wrh.log(f'allreduced_grads[{i}].op.inputs', '%r', x.op.inputs)
-                wrh.log(f'allreduced_grads[{i}].op.outputs', '%r', x.op.outputs)
-                wrh.log(f'weights[{i}]', '%r', y)
-            wrh.pop('create_distributed_optimizer._DistributedOptimizer._compute_gradients')
             return ret
 
         def get_gradients(self, loss, params):

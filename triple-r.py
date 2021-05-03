@@ -345,23 +345,18 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
         opt = tf.keras.optimizers.Adam(0.001)
         print(f'{rank=} {opt.__class__ = }, {opt.__class__.__base__ = }')
 
+        mypatch.set_params(
+            divisor=event.nworkers,
+            act_after_layer=event.nlayers if rank > event.nworkers else None,
+            act_after_gradient=event.ngradients if rank > event.nworkers else None,
+            action='stop',
+        )
+
         opt = hvd.DistributedOptimizer(
             opt,
             backward_passes_per_step=1,
             average_aggregated_gradients=True,
-            op=hvd.Sum,
         )
-        print(f'{rank=} {opt.__class__ = }, {opt.__class__.__base__ = }')
-
-        if rank == -1:
-            opt = create_no_op_optimizer(opt)
-            print(f'{rank=} {opt.__class__ = }, {opt.__class__.__base__ = }')
-
-       # old_allreduce = opt._allreduce
-       # def _allreduce(grads):
-       #     print(f'{rank=} {grads = }')
-       #     return old_allreduce(grads)
-       # opt._allreduce = _allreduce
 
         if event.reload:
             wrh.push('reload')
@@ -441,6 +436,8 @@ class Event:
     batch: int
     reload: bool
     checkpoint: bool
+    ngradients: int
+    nlayers: int
  
     @classmethod
     def parse(cls, s):
@@ -456,8 +453,14 @@ class Event:
         batch = int(options.get('batch', 32))
         reload = bool(options.get('reload', False))
         checkpoint = bool(options.get('checkpoint', False))
+        ngradients = options.get('ngradients', None)
+        if ngradients is not None:
+            ngradients = int(ngradients)
+        nlayers = options.get('nlayers', None)
+        if nlayers is not None:
+            nlayers = int(nlayers)
 
-        return cls(nepochs, nworkers, batch, reload, checkpoint)
+        return cls(nepochs, nworkers, batch, reload, checkpoint, ngradients, nlayers)
 
 
 def cli():
