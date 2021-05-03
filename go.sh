@@ -174,6 +174,10 @@ go-trial() {
     exec > >(tee -a stdout.txt)
     exec 2> >(tee -a stderr.txt >/dev/stderr)
 
+    mkdir -p /dev/shm/metem
+    mkdir -p /dev/shm/metem/data
+    (cd /dev/shm/metem/data && tar xf ${data:?}/tiny-imagenet-200.tar.gz)
+
     printf $'==== Date: %s\n' "$(date)" >&2
     printf $'==== File: %s\n' triple-r.py >&2
     cat triple-r.py >&2
@@ -192,19 +196,23 @@ go-trial() {
     printf $'%s,' "${columns[@]}"
     printf $'real,user,sys\n'
 
-    for nepochs in 8 16; do
-    for ckpt_freq in 4 3 2 1; do
-    for failure_epoch in 2 6; do
-    for dataset in tiny-imagenet; do
+    for nepochs in 1; do
+    for ckpt_freq in -1; do
+    for failure_epoch in -1; do
+    for dataset in emnist; do
     for div in 1; do
-    for model in ResNet50; do
-    for nworkers in 8; do
+    for model in CNN-2; do
+    for nworkers in 3; do
+    for seed in {1337..1347}; do
+    for name in "loss_test,dataset=${dataset:?},model=${model:?},nworkers=${nworkers:?},seed=${seed:?}"; do
+
+    mkdir -p logs/${name:?}
 
     events=()
     did_failure=0
     since_last_ckpt=0
     for ((i=1; i<=nepochs; ++i)); do
-        event="1e/nworkers=${nworkers}"
+        event="1e/nworkers=${nworkers:?},seed=${seed:?}"
         if ((!did_failure && i == failure_epoch)); then
             event+=",reload=True"
             did_failure=1
@@ -237,7 +245,6 @@ go-trial() {
     -np ${nworkers} \
     -host ${host:?} \
     ${iface:+-iface ${iface:?}} \
-        ${root:?}/go.sh singularity exec env \
             ${whatreallyhappened:?}/go.sh exec \
                 ${venv:?}/bin/python \
                 -u \
@@ -248,12 +255,14 @@ go-trial() {
                     --checkpoint-dir ${checkpoint:?} \
                     --default-verbosity 2 \
                     --div ${div} \
-                    --log-to 'logs/%(rank+1)dof%(size)d.log' \
+                    --log-to 'logs/'"${name:?}"'/%(rank+1)dof%(size)d.log' \
                     ${events} \
     >&2
 
     done
 
+    done
+    done
     done
     done
     done
@@ -370,8 +379,35 @@ go-extract-tiny-imagenet() {
 		new=${data:?}/tiny-imagenet-200/val/${class:?}/images/${filename:?}
 
 		mkdir -p ${new%/*}
-		ln -sf ${orig:?} ${new:?}
+		ln ${orig:?} ${new:?}
 	done
+}
+
+go-extract-batch-loss() {
+    awk '
+        BEGIN {
+            FS = "\t";
+            OFS = ",";
+            print "batch", "loss";
+        }
+
+        inbatch && $3 == "batch" {
+            thebatch = $4;
+        }
+
+        inbatch && $3 == "loss" {
+            theloss = $4;
+        }
+
+        $3 == "@started" && $4 == "batch" {
+            inbatch = 1;
+        }
+
+        $3 == "@finished" && $4 == "batch" {
+            inbatch = 0;
+            print thebatch, theloss;
+        }
+    ' "$@"
 }
 
 go-"$@"

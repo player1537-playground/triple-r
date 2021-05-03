@@ -4,6 +4,7 @@
 """
 
 from dataclasses import dataclass
+from functools import partial
 import logging
 from pathlib import Path
 import re
@@ -128,8 +129,8 @@ class PreciseEarlyStopping(tf.keras.callbacks.Callback):
         wrh.pop('batch')
 
     def _check_condition_and_stop(self):
-        on_epoch = self.epoch == self.nepochs - 1
-        on_batch = self.batch == self.nbatches - 1
+        on_epoch = self.nepochs is not None and self.epoch == self.nepochs - 1
+        on_batch = self.nbatches is not None and self.batch == self.nbatches - 1
         if on_epoch and on_batch:
             self.model.stop_training = True
 
@@ -233,13 +234,13 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
         input_shape = info.features['image'].shape
         output_shape = info.features['label'].num_classes
         train_ds = datasets['train']
-        valid_ds = datasets['valid']
+        valid_ds = datasets['test']
 
-        train_ds = train_ds.map(lambda img, label: (tf.image.convert_image_dtype(img, dtype=tf.float32), label))
-        valid_ds = valid_ds.map(lambda img, label: (tf.image.convert_image_dtype(img, dtype=tf.float32), label))
+        train_ds = train_ds.map(lambda img, label: (tf.image.convert_image_dtype(img, dtype=tf.float32), tf.one_hot(label, output_shape)))
+        valid_ds = valid_ds.map(lambda img, label: (tf.image.convert_image_dtype(img, dtype=tf.float32), tf.one_hot(label, output_shape)))
 
         num_train = info.splits['train'].num_examples
-        num_valid = info.splits['validation'].num_examples
+        num_valid = info.splits['test'].num_examples
     elif is_tiny_imagenet:
         # Training data iterator.
         input_shape = (224, 224, 3)
@@ -307,12 +308,6 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
     )
     wrh.pop('creating model')
 
-    callbacks = [
-        hvd.callbacks.BroadcastGlobalVariablesCallback(0),
-        hvd.callbacks.MetricAverageCallback(),
-        PreciseEarlyStopping(nepochs=-1, nbatches=-1),
-    ]
-
     if rank == 0:
         pass # callbacks.append(tf.keras.callbacks.ModelCheckpoint(checkpoint_dir / 'checkpoint.h5', save_weights_only=False))
 
@@ -328,6 +323,8 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
     for event in events:
         wrh.push('event')
         wrh.log('event', '%r', event)
+
+        tf.random.set_seed(event.seed)
 
         opt = tf.keras.optimizers.Adam(0.001)
         print(f'{rank=} {opt.__class__ = }, {opt.__class__.__base__ = }')
@@ -349,13 +346,6 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
        #     return old_allreduce(grads)
        # opt._allreduce = _allreduce
 
-        model.compile(
-            optimizer=opt,
-            metrics=['accuracy'],
-            loss=tf.losses.CategoricalCrossentropy(from_logits=True),
-            experimental_run_tf_function=False,
-        )
-
         if event.reload:
             wrh.push('reload')
             print(f'Reloading weights')
@@ -370,6 +360,21 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
             wrh.log('weights', '%r', weights)
             model = hvd.load_model(weights)
             wrh.pop('reload')
+
+        model.compile(
+            optimizer=opt,
+            metrics=['accuracy'],
+            loss=tf.losses.CategoricalCrossentropy(from_logits=True),
+            experimental_run_tf_function=False,
+        )
+
+        model.summary()
+
+        callbacks = [
+            hvd.callbacks.BroadcastGlobalVariablesCallback(0),
+            hvd.callbacks.MetricAverageCallback(),
+            PreciseEarlyStopping(nepochs=initial_epoch + event.nepochs, nbatches=event.nbatches),
+        ]
 
         wrh.push('train')
         model.fit(
@@ -421,6 +426,8 @@ class Event:
     batch: int
     reload: bool
     checkpoint: bool
+    seed: 'Optional[int]'
+    nbatches: int
  
     @classmethod
     def parse(cls, s):
@@ -436,8 +443,14 @@ class Event:
         batch = int(options.get('batch', 32))
         reload = bool(options.get('reload', False))
         checkpoint = bool(options.get('checkpoint', False))
+        seed = options.get('seed', None)
+        if seed is not None:
+            seed = int(seed)
+        nbatches = options.get('nbatches', None)
+        if nbatches is not None:
+            nbatches = int(nbatches)
 
-        return cls(nepochs, nworkers, batch, reload, checkpoint)
+        return cls(nepochs, nworkers, batch, reload, checkpoint, seed, nbatches)
 
 
 def cli():

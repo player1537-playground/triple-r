@@ -285,7 +285,6 @@ class BatchPattern:
     finished: Tuple[Any, Literal['batch']]
     epoch: Any
     loss: Any
-    accuracy: Any
 
 
 class EpochPattern:
@@ -331,73 +330,13 @@ class WorkerPattern:
 def main(outfile, infiles, presorted):
     writer = csv.writer(outfile)
 
-    event_lookup = {}
-
+    writer.writerow(['batch', 'loss'])
     for tree in Tree.readiter(infiles, presorted=presorted):
-        Epoch = NewType('Epoch', int)
-        Batch = NewType('Batch', int)
-        Seconds = NewType('Seconds', float)
-        Loss = NewType('Loss', float)
-        Accuracy = NewType('Accuracy', float)
+        for batch in tree.match(Recursive[BatchPattern]):
+            batch_number = int(batch.values['batch'])
+            loss = float(batch.values['loss'])
 
-        per_epoch: Dict[Tuple[Epoch], Tuple[Seconds, Loss, Accuracy]] = {}
-        per_batch: Dict[Tuple[Epoch, Batch], Tuple[Seconds, Loss]] = {}
-        parameters = {}
-
-        for trial in tree.match(Recursive[TripleRPattern]):
-            total_trial_time = (trial.times['finished'] - trial.times['started']).total_seconds()
-            print(f'{total_trial_time = }s')
-            parameters = { **parameters, **trial.values.logs }
-            for train in tree.match(Recursive[TrainPattern]):
-                for epoch in train.match(Recursive[EpochPattern]):
-                    per_epoch[(int(epoch.values['epoch']),)] = (
-                        (epoch.times['finished'] - epoch.times['started']).total_seconds(),
-                        float(epoch.values['loss']),
-                        float(epoch.values['accuracy']),
-                    )
-
-                    for batch in epoch.children:
-                        per_batch[int(epoch.values['epoch']), int(batch.values['batch'])] = (
-                            (batch.times['finished'] - batch.times['started']).total_seconds(),
-                            float(batch.values['loss']),
-                        )
-
-        if 'events' in parameters:
-            events = parameters['events']
-            if events not in event_lookup:
-                event_lookup[events] = len(event_lookup)
-            parameters['events'] = event_lookup[events]
-        
-        if 'data_dir' in parameters:
-            parameters.pop('data_dir')
-        
-        if 'checkpoint_dir' in parameters:
-            parameters.pop('checkpoint_dir')
-        
-        if 'hvd.mpi_threads_supported' in parameters:
-            parameters.pop('hvd.mpi_threads_supported')
-        
-        if '_executing_eagerly' in parameters:
-            parameters.pop('_executing_eagerly')
-
-        print(parameters)
-        parameter_names = sorted(parameters.keys())
-        parameter_values = [parameters[k] for k in parameter_names]
-
-        writer.writerow(['=== EPOCH ==='])
-        writer.writerow([*parameter_names, 'epoch', 'seconds', 'loss', 'accuracy'])
-        for key, row in per_epoch.items():
-            writer.writerow([*parameter_values, *key, *row])
-
-        writer.writerow(['=== BATCH ==='])
-        writer.writerow([*parameter_names, 'epoch', 'batch', 'seconds', 'loss'])
-        for key, row in per_batch.items():
-            writer.writerow([*parameter_values, *key, *row])
-
-    writer.writerow(['=== EVENTS ==='])
-    writer.writerow(['id', 'event'])
-    for event, id in event_lookup.items():
-        writer.writerow([id, event])
+            writer.writerow([str(batch_number), str(loss)])
 
 
 def cli():
