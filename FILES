@@ -1,6 +1,7 @@
 go.sh
-candle.py
-test.py
 triple-r.py
+mypatch.py
+monkeypatch.py
 checkpoint.py
 logparse.py
+test.py

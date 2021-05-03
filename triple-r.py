@@ -3,6 +3,8 @@
 
 """
 
+import mypatch
+
 from dataclasses import dataclass
 import logging
 from pathlib import Path
@@ -14,6 +16,7 @@ from typing import Tuple, Optional
 logging.basicConfig()
 logging.getLogger().setLevel(logging.DEBUG)
 logging.getLogger('PIL.Image').setLevel(logging.ERROR)
+logging.getLogger('matplotlib').setLevel(logging.ERROR)
 
 import horovod.tensorflow.keras as hvd
 from horovod.tensorflow import join as hvd_join, _executing_eagerly
@@ -25,7 +28,6 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 import whatreallyhappened as wrh
 
-from monkeypatch import monkeypatch
 
 np.set_string_function(lambda x: f'array(..., dtype={x.dtype}, shape={x.shape})')
 
@@ -174,7 +176,7 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
         'rank': rank,
         'size': size,
         'rank+1': rank + 1,
-    }, 'a')
+    }, 'a', always_flush=True)
 
     if log_info is not None:
         wrh.load(log_info % {
@@ -289,9 +291,7 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
             output_signature=(tf.TensorSpec(shape=[1, *input_shape], dtype=tf.float32),
                               tf.TensorSpec(shape=(1, output_shape,), dtype=tf.int32)),
         ) \
-            .unbatch() \
-            .cache() \
-            .shuffle(10000)
+            .unbatch()
             #.map(lambda x, y: (debug('before x', x), debug('before y', y))) \
             #.map(lambda x, y: (debug('after x', x), debug('after y', y))) \
             #.map(lambda x, y: (debug('unbatch x', x), debug('unbatch y', y))) \
@@ -307,9 +307,7 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
             output_signature=(tf.TensorSpec(shape=[1, *input_shape], dtype=tf.float32),
                               tf.TensorSpec(shape=(1, output_shape,), dtype=tf.int32)),
         ) \
-            .unbatch() \
-            .cache() \
-            .shuffle(10000)
+            .unbatch()
         
     wrh.pop('loading dataset')
 
@@ -351,6 +349,7 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
             opt,
             backward_passes_per_step=1,
             average_aggregated_gradients=True,
+            op=hvd.Sum,
         )
         print(f'{rank=} {opt.__class__ = }, {opt.__class__.__base__ = }')
 
@@ -387,14 +386,20 @@ def main(events, make_model_fn, div, dataset, default_verbosity, data_dir, check
         )
 
         wrh.push('train')
-        model.fit(
-            train_ds.repeat().batch(event.batch),
-            steps_per_epoch=num_train // event.batch // event.nworkers // div,
-            callbacks=callbacks,
-            epochs=initial_epoch + event.nepochs,
-            initial_epoch=initial_epoch,
-            verbose=default_verbosity if hvd.rank() == 0 else 0,
-        )
+        try:
+            model.fit(
+                train_ds.repeat().batch(event.batch),
+                steps_per_epoch=num_train // event.batch // event.nworkers // div,
+                callbacks=callbacks,
+                epochs=initial_epoch + event.nepochs,
+                initial_epoch=initial_epoch,
+                verbose=default_verbosity if hvd.rank() == 0 else 0,
+            )
+        except Exception as e:
+            wrh.log('exception', '%r', e)
+            wrh.pop('train')
+            wrh.pop('event')
+            continue
         wrh.pop('train')
 
         wrh.push('valid')

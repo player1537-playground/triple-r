@@ -251,9 +251,10 @@ go-onetrial() {
                     --checkpoint-dir ${checkpoint:?} \
                     --default-verbosity 2 \
                     --div ${div} \
-                    --log-to ${logs:?}/${name:?}/'%(rank+1)dof%(size)d.log' \
-                    ${events} \
-    >&2
+                    --log-to /dev/stdout \
+                    ${events}
+    #>&2
+                    #--log-to ${logs:?}/${name:?}/'%(rank+1)dof%(size)d.log' \
 }
 
 go-trial() {
